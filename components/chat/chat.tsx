@@ -1,6 +1,8 @@
+"use client"
 import { useState, useRef, useEffect } from "react";
 import { ChatMessage } from "./chat-message";
 import { ChatInput } from "./chat-input";
+
 
 interface Message {
   content: string;
@@ -8,11 +10,18 @@ interface Message {
   timestamp: Date;
 }
 
+interface ChatHistoryItem {
+  role: string;
+  parts: { text: string }[];
+}
+
 export function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [currentStreamingMessage, setCurrentStreamingMessage] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const sessionIdRef = useRef<string>( Number(Math.random().toString().slice(2)).toString());
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -22,7 +31,32 @@ export function Chat() {
     scrollToBottom();
   }, [messages, currentStreamingMessage]);
 
+  // Cleanup function for aborting ongoing requests
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
+
+  const convertHistoryToMessages = (history: ChatHistoryItem[]): Message[] => {
+    return history.map(item => ({
+      content: item.parts[0].text,
+      isUser: item.role === 'user',
+      timestamp: new Date(),
+    }));
+  };
+
   const handleSendMessage = async (content: string) => {
+    // Cancel any ongoing request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    // Create new AbortController for this request
+    abortControllerRef.current = new AbortController();
+
     // Add user message
     const userMessage: Message = {
       content,
@@ -39,54 +73,42 @@ export function Chat() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ message: content }),
+        body: JSON.stringify({ 
+          message: content,
+          sessionId: sessionIdRef.current
+        }),
+        signal: abortControllerRef.current.signal,
       });
 
       if (!response.ok) {
         throw new Error("Network response was not ok");
       }
 
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
+      const data = await response.json();
 
-      if (!reader) {
-        throw new Error("No reader available");
+      // Update messages with the full chat history
+      if (data.history) {
+        const historyMessages = convertHistoryToMessages(data.history);
+        setMessages(historyMessages);
+      } else {
+        // Fallback to just adding the new message if no history
+        const aiMessage: Message = {
+          content: data.text,
+          isUser: false,
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, aiMessage]);
       }
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value);
-        const lines = chunk.split("\n");
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.text) {
-                setCurrentStreamingMessage((prev) => prev + data.text);
-              }
-              if (data.error) {
-                throw new Error(data.error);
-              }
-            } catch (e) {
-              console.error("Error parsing SSE data:", e);
-            }
-          }
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        if (error.name === "AbortError") {
+          console.log("Request was aborted");
+          return;
         }
+        console.error("Error generating response:", error.message);
+      } else {
+        console.error("Unknown error occurred");
       }
-
-      // Add the complete AI message
-      const aiMessage: Message = {
-        content: currentStreamingMessage,
-        isUser: false,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, aiMessage]);
-      setCurrentStreamingMessage("");
-    } catch (error) {
-      console.error("Error generating response:", error);
       // Add error message
       const errorMessage: Message = {
         content: "Sorry, I encountered an error. Please try again.",
@@ -96,6 +118,8 @@ export function Chat() {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
+      setCurrentStreamingMessage("");
+      abortControllerRef.current = null;
     }
   };
 
