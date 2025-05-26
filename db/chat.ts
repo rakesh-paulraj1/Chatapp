@@ -1,10 +1,11 @@
-import { db } from './index';
+import {db } from '@/db/drizzle';
 import { messages, type NewMessage } from './schema';
 import { eq } from 'drizzle-orm';
 
 export async function saveMessage(message: NewMessage) {
   return await db.insert(messages).values(message).returning();
 }
+
 
 export async function getMessagesByConversationId(conversationId: string) {
   return await db
